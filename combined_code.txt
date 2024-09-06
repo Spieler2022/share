@@ -1,0 +1,1675 @@
+
+
+# File: C:\dev\myVok\apis.js
+const main = require("./mainvar");
+
+main.web.app.get("/username-count/:string", async (req, res) => {
+  req_username = req.params.string;
+  res.status(200).send({ count: await main.getUsernameCount(req_username) });
+});
+
+main.getUsernameCount = async function getUsernameCount(username) {
+  try {
+    // Führe eine SQL-Abfrage aus, um alle Benutzer zu finden, deren Username mit dem übergebenen Username übereinstimmt oder ähnlich ist (z.B. username, username#1, username#2 usw.)
+    const [rows] = await main.db.users.query(
+      "SELECT COUNT(*) AS count FROM `users` WHERE `username` LIKE ?",
+      [`${username}%`]
+    );
+
+    // Gib die Anzahl der gefundenen Benutzer zurück
+    return rows[0].count;
+  } catch (error) {
+    console.error("Error querying the database:", error);
+    throw error;
+  }
+};
+
+################################################################################
+
+
+# File: C:\dev\myVok\config.json
+{
+  "web": {
+    "port": 3000,
+    "secure": false,
+    "secretKey": "fn3rDZThxKvGM69D/HksvYRQTw2id3JnaAeGi69/J/w="
+  },
+  "db": {
+    "license": {
+      "host": "localhost",
+      "user": "root",
+      "password": "",
+      "database": "myvok_license"
+    },
+    "users": {
+      "host": "localhost",
+      "user": "root",
+      "password": "",
+      "database": "myvok_users"
+    }
+  }
+}
+
+################################################################################
+
+
+# File: C:\dev\myVok\db.js
+const mysql = require("mysql2/promise");
+const fs = require("fs");
+const config = JSON.parse(fs.readFileSync("./config.json", "utf8"));
+const db = {};
+
+db.license = mysql.createPool({
+  host: config.db.license.host,
+  user: config.db.license.user,
+  password: config.db.license.password,
+  database: config.db.license.database,
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
+});
+
+db.users = mysql.createPool({
+  host: config.db.users.host,
+  user: config.db.users.user,
+  password: config.db.users.password,
+  database: config.db.users.database,
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
+});
+
+module.exports = db;
+
+################################################################################
+
+
+# File: C:\dev\myVok\index.js
+const fs = require("fs");
+const path = require("path");
+const http = require("http");
+const socketIo = require("socket.io");
+const moment = require("moment");
+const main = require("./mainvar");
+const server = http.createServer(main.web.app);
+const session = require("express-session");
+const io = socketIo(server);
+require("./auth/login");
+require("./auth/signup");
+const bcrypt = require("bcrypt");
+const saltRounds = 10; // Anzahl der Salt-Rounds für bcrypt
+require("./apis");
+require("./main/main");
+
+main.web.app.use(
+  "/assets",
+  main.web.express.static(path.join(__dirname, "public", "assets"))
+);
+main.web.app.use(main.web.express.urlencoded({ extended: true }));
+main.web.app.use(
+  session({
+    secret: main.config.web.secretKey,
+    resave: false,
+    saveUninitialized: true,
+    cookie: { secure: main.config.web.secure },
+  })
+);
+
+io.on("connection", (socket) => {
+  console.log("[SOCKET] connect");
+
+  socket.on("disconnect", () => {
+    console.log("[SOCKET] disconnect");
+  });
+});
+
+server.listen(main.config.web.port, () => {
+  console.log(
+    "[WEB] Webserver und Socket.io Server laufen auf Port " +
+      main.config.web.port
+  );
+});
+
+################################################################################
+
+
+# File: C:\dev\myVok\mainvar.js
+const fs = require("fs");
+const config = JSON.parse(fs.readFileSync("./config.json", "utf8"));
+db = require("./db");
+const express = require("express");
+const main = {};
+main.web = {};
+main.web.app = express();
+main.web.express = express;
+
+main.config = config;
+main.db = db;
+
+module.exports = main;
+
+################################################################################
+
+
+# File: C:\dev\myVok\package.json
+{
+  "name": "myvok",
+  "version": "1.0.0",
+  "description": "A vocabulary learn app that mekes learning easier with games.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Louis Benthien",
+  "license": "ISC",
+  "dependencies": {
+    "bcrypt": "^5.1.1",
+    "discord.js": "^14.16.1",
+    "express": "^4.19.2",
+    "express-session": "^1.18.0",
+    "moment": "^2.30.1",
+    "mysql2": "^3.11.0",
+    "socket.io": "^4.7.5"
+  }
+}
+
+################################################################################
+
+
+# File: C:\dev\myVok\auth\login.js
+const fs = require("fs");
+const path = require("path");
+const main = require("../mainvar");
+const bcrypt = require("bcrypt");
+const saltRounds = 10; // Anzahl der Salt-Rounds für bcrypt
+
+main.web.app.get("/login", (req, res) => {
+  res.status(200).sendFile(path.join(__dirname, "../public", "login.html"));
+});
+
+main.web.app.post("/login", async (req, res) => {
+  await webLogin(req, res);
+});
+
+async function webLogin(req, res) {
+  const username = req.body.username; // Name des Benutzers
+  const password = req.body.pw; // Passwort des Benutzers
+  const [user] = await main.db.users.query(
+    "SELECT * FROM `users` WHERE `username` = ?",
+    [username]
+  );
+  if (!username || !password) {
+    return res
+      .status(200)
+      .send(
+        fs
+          .readFileSync("../public/login.html", "utf8")
+          .replace("Fill in your data", "All fields required!")
+      );
+  }
+
+  if (user.length === 0) {
+    return res
+      .status(200)
+      .send(
+        fs
+          .readFileSync("../public/login.html", "utf8")
+          .replace(
+            "Fill in your data",
+            "<span style='text-decoration: underline; text-decoration-color: #a43426'>Wrong password or username</span>"
+          )
+      );
+  }
+  bcrypt.compare(password, user[0].password_hash, (err, result) => {
+    if (err) {
+      console.error("Error comparing password:", err);
+      return;
+    }
+    if (result === true) {
+      req.session.user = username; // Benutzer in Sitzung speichern
+      res.redirect("/dashboard");
+      return;
+    } else {
+      return res
+        .status(200)
+        .send(
+          fs
+            .readFileSync("../public/login.html", "utf8")
+            .replace(
+              "Fill in your data",
+              "<span style='text-decoration: underline; text-decoration-color: #692219'>Wrong password or username</span>"
+            )
+        );
+    }
+  });
+}
+
+################################################################################
+
+
+# File: C:\dev\myVok\auth\signup.js
+const fs = require("fs");
+const path = require("path");
+const main = require("../mainvar");
+const bcrypt = require("bcrypt");
+const saltRounds = 10; // Anzahl der Salt-Rounds für bcrypt
+const moment = require("moment");
+
+main.web.app.get("/signup", (req, res) => {
+  res
+    .status(200)
+    .sendFile(path.join(__dirname, "../public", "before_signup.html"));
+});
+
+main.web.app.post("/signup", async (req, res) => {
+  await webSignup(req, res);
+});
+
+async function webSignup(req, res) {
+  const licenseKey = req.body.key; // Lizenzschlüssel
+  const name = req.body.name; // Name des Benutzers
+  const password = req.body.pw; // Passwort des Benutzers
+  const signup = req.body.signup; // Passwort des Benutzers
+
+  if (!licenseKey) {
+    return res
+      .status(200)
+      .sendFile(path.join(__dirname, "../public", "before_signup.html"));
+  }
+
+  try {
+    // SQL-Abfrage, um zu überprüfen, ob der License-Key existiert
+    const [rows] = await main.db.license.query(
+      "SELECT * FROM `keys` WHERE `key` = ?",
+      [licenseKey]
+    );
+
+    const htmlContent = fs.readFileSync("../public/before_signup.html", "utf8");
+
+    if (rows.length === 0) {
+      return res
+        .status(200)
+        .send(htmlContent.replace("xxx-xxx-xxx-xxx", "INVALID KEY!"));
+    }
+
+    if (moment().isAfter(moment(rows[0].create_date).add(30, "days"))) {
+      return res
+        .status(200)
+        .send(htmlContent.replace("xxx-xxx-xxx-xxx", "KEY EXPIRED!"));
+    }
+
+    if (rows[0].uses_left < 1) {
+      return res
+        .status(200)
+        .send(htmlContent.replace("xxx-xxx-xxx-xxx", "NO USES LEFT!"));
+    }
+
+    if (signup == "true" && (!name || !password)) {
+      return res
+        .status(200)
+        .send(
+          fs
+            .readFileSync("../public/signup.html", "utf8")
+            .replace("Please enter your name", "All fields required!")
+        );
+    }
+
+    if (signup == "true") {
+      const hashedPassword = await bcrypt.hash(password, saltRounds);
+      let username = name
+        .trim()
+        .toLowerCase()
+        .replaceAll(" ", ".")
+        .replace(/[^a-zA-Z0-9.]/g, "");
+      if ((await main.getUsernameCount(username)) > 0) {
+        username = username + "#" + (await getUsernameCount(username));
+      }
+
+      // Daten in die Benutzerdatenbank einfügen
+      await main.db.users.query(
+        "INSERT INTO `users` (`username`, `name`, `password_hash`, `class_id`) VALUES (?, ?, ?, ?)",
+        [username, name, hashedPassword, rows[0].class_id]
+      );
+
+      await main.db.license.query(
+        "UPDATE `keys` SET `uses_left` = `uses_left` - 1 WHERE `key` = ?",
+        [licenseKey]
+      );
+
+      return res
+        .status(200)
+        .send(
+          fs
+            .readFileSync("../public/success_signup.html", "utf8")
+            .replace("USERNAME_REPLACE", username)
+        );
+    }
+
+    res
+      .status(200)
+      .send(
+        fs
+          .readFileSync("../public/signup.html", "utf8")
+          .replace("KEY_REPLACE", licenseKey)
+      );
+  } catch (err) {
+    console.error("Error querying the database:", err);
+    return res
+      .status(200)
+      .send(
+        fs
+          .readFileSync("../public/before_signup.html", "utf8")
+          .replace("xxx-xxx-xxx-xxx", "INTERNAL SERVER ERROR")
+      );
+  }
+}
+
+################################################################################
+
+
+# File: C:\dev\myVok\main\main.js
+const fs = require("fs");
+const path = require("path");
+const main = require("../mainvar");
+
+function ensureAuthenticated(req, res, next) {
+  if (req.session.user) {
+    return next();
+  } else {
+    res.redirect("/login"); // Anmeldeformular anzeigen
+  }
+}
+
+main.web.app.get("/dashboard", ensureAuthenticated, (req, res) => {
+  res
+    .status(200)
+    .send(
+      fs
+        .readFileSync("../public/dashboard.html", "utf8")
+        .replace("INPUT#0001", req.session.user)
+    );
+});
+
+################################################################################
+
+
+# File: C:\dev\myVok\public\before_signup.html
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="assets/styles/index.css" />
+    <title>myVok</title>
+  </head>
+  <body>
+    <div id="licenseBox">
+      <form id="licenseform" method="post" action="/signup">
+        Licensekey<br />
+        <input
+          type="text"
+          name="key"
+          placeholder="xxx-xxx-xxx-xxx"
+          autocomplete="off"
+        />
+      </form>
+      <div id="back-button" onclick="location.href = '/'">←</div>
+    </div>
+    <div id="heading">myVok</div>
+  </body>
+</html>
+
+################################################################################
+
+
+# File: C:\dev\myVok\public\dashboard.html
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link
+      href="https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="assets/styles/dashboard.css" />
+    <title>myVok | Dashboard</title>
+  </head>
+
+  <body>
+    <div class="top-container">
+      <div class="nav">
+        <div class="logo">
+          <i class="bx bxl-codepen"></i>
+          <a href="#">AsmrProg</a>
+        </div>
+
+        <div class="nav-links">
+          <a href="#">Dashboard</a>
+          <a href="#">Statistics</a>
+          <a href="#">Courses</a>
+          <a href="#">Settings</a>
+        </div>
+
+        <div class="right-section">
+          <i class="bx bx-bell"></i>
+          <i class="bx bx-search"></i>
+
+          <div class="profile">
+            <div class="info">
+              <img src="assets/img/profile.png" />
+              <div>
+                <a href="#">INPUT#00001</a>
+                <p>Data Scientist</p>
+              </div>
+            </div>
+            <i class="bx bx-chevron-down"></i>
+          </div>
+        </div>
+      </div>
+
+      <div class="status">
+        <div class="header">
+          <h4 id="big">Your courses</h4>
+          <h4 id="small">Weekly Activity</h4>
+        </div>
+
+        <div class="items-list">
+          <div class="item">
+            <div class="info">
+              <div>
+                <h5>Data Analysis</h5>
+                <p>- 3 lessons left</p>
+                <p>- 1 project left</p>
+              </div>
+              <i class="bx bx-data"></i>
+            </div>
+            <div class="progress">
+              <div class="bar"></div>
+            </div>
+          </div>
+          <div class="item">
+            <div class="info">
+              <div>
+                <h5>Machine Learn</h5>
+                <p>- 2 assignments left</p>
+                <p>- 5 tutorials left</p>
+              </div>
+              <i class="bx bx-terminal"></i>
+            </div>
+            <div class="progress">
+              <div class="bar"></div>
+            </div>
+          </div>
+          <div class="item">
+            <div class="info">
+              <div>
+                <h5>Python</h5>
+                <p>- 4 chapters left</p>
+                <p>- 8 quizzes left</p>
+              </div>
+              <i class="bx bxl-python"></i>
+            </div>
+            <div class="progress">
+              <div class="bar"></div>
+            </div>
+          </div>
+          <div class="item">
+            <canvas class="activity-chart"></canvas>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="bottom-container">
+      <div class="prog-status">
+        <div class="header">
+          <h4>learning Progress</h4>
+          <div class="tabs">
+            <a href="#" class="active">1Y</a>
+            <a href="#">6M</a>
+            <a href="#">3M</a>
+          </div>
+        </div>
+
+        <div class="details">
+          <div class="item">
+            <h2>3.45</h2>
+            <p>Current GPA</p>
+          </div>
+          <div class="separator"></div>
+          <div class="item">
+            <h2>4.78</h2>
+            <p>Class Average GPA</p>
+          </div>
+        </div>
+
+        <canvas class="prog-chart"></canvas>
+      </div>
+
+      <div class="popular">
+        <div class="header">
+          <h4>Popular</h4>
+          <a href="#"># Data</a>
+        </div>
+
+        <img src="assets/img/podcast.jpg" />
+        <div class="audio">
+          <i class="bx bx-podcast"></i>
+          <a href="#">Poedcast: Mastering Data Visualization</a>
+        </div>
+        <p>Learn to create compelling visualizations with data.</p>
+        <div class="listen">
+          <div class="author">
+            <img src="assets/img/profile.png" />
+            <div>
+              <a href="#">Alex</a>
+              <p>Data Analyst</p>
+            </div>
+          </div>
+          <button>Listen<i class="bx bx-right-arrow-alt"></i></button>
+        </div>
+      </div>
+
+      <div class="upcoming">
+        <div class="header">
+          <h4>You may like it</h4>
+          <a href="#">July <i class="bx bx-chevron-down"></i></a>
+        </div>
+
+        <div class="dates">
+          <div class="item">
+            <h5>Mo</h5>
+            <a href="#">12</a>
+          </div>
+          <div class="item active">
+            <h5>Tu</h5>
+            <a href="#">13</a>
+          </div>
+          <div class="item">
+            <h5>We</h5>
+            <a href="#">14</a>
+          </div>
+          <div class="item">
+            <h5>Th</h5>
+            <a href="#">15</a>
+          </div>
+          <div class="item">
+            <h5>Fr</h5>
+            <a href="#">16</a>
+          </div>
+          <div class="item">
+            <h5>Sa</h5>
+            <a href="#">17</a>
+          </div>
+          <div class="item">
+            <h5>Su</h5>
+            <a href="#">18</a>
+          </div>
+        </div>
+
+        <div class="events">
+          <div class="item">
+            <div>
+              <i class="bx bx-time"></i>
+              <div class="event-info">
+                <a href="#">Data Science</a>
+                <p>10:00-11:30</p>
+              </div>
+            </div>
+            <i class="bx bx-dots-horizontal-rounded"></i>
+          </div>
+          <div class="item">
+            <div>
+              <i class="bx bx-time"></i>
+              <div class="event-info">
+                <a href="#">Machine Learning</a>
+                <p>13:30-15:00</p>
+              </div>
+            </div>
+            <i class="bx bx-dots-horizontal-rounded"></i>
+          </div>
+          <div class="item">
+            <div>
+              <i class="bx bx-time"></i>
+              <div class="event-info">
+                <a href="#">Beginner Python</a>
+                <p>11:30-13:00</p>
+              </div>
+            </div>
+            <i class="bx bx-dots-horizontal-rounded"></i>
+          </div>
+          <div class="item">
+            <div>
+              <i class="bx bx-time"></i>
+              <div class="event-info">
+                <a href="#">Introduction to SQL</a>
+                <p>10:00-11:30</p>
+              </div>
+            </div>
+            <i class="bx bx-dots-horizontal-rounded"></i>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="assets/scripts/dashboard.js"></script>
+  </body>
+</html>
+
+################################################################################
+
+
+# File: C:\dev\myVok\public\login.html
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="assets/styles/index.css" />
+    <title>myVok</title>
+  </head>
+  <body>
+    <div id="licenseBox">
+      <form id="licenseform" method="post" action="/login">
+        LogIn<br />
+        <input
+          type="text"
+          name="username"
+          placeholder="username"
+          autocomplete="name"
+        />
+        <input type="password" name="pw" placeholder="password" />
+        <div id="submit-section">
+          <span>Fill in your data</span><button type="submit">Log-in</button>
+        </div>
+      </form>
+      <div id="back-button" onclick="location.href = '/'">←</div>
+    </div>
+    <div id="heading">myVok</div>
+  </body>
+</html>
+
+################################################################################
+
+
+# File: C:\dev\myVok\public\signup.html
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="assets/styles/index.css" />
+    <title>myVok</title>
+  </head>
+  <body>
+    <div id="licenseBox">
+      <form id="licenseform" method="post" action="/signup">
+        Create Account<br />
+        <input
+          id="nameInput"
+          type="text"
+          name="name"
+          placeholder="Your Name"
+          autocomplete="name"
+        />
+        <input type="password" name="pw" placeholder="Password" />
+        <input
+          type="text"
+          name="key"
+          value="KEY_REPLACE"
+          style="display: none"
+        />
+        <input type="text" name="signup" value="true" style="display: none" />
+        <div id="submit-section">
+          <span id="usernameOutput">Please enter your name</span
+          ><button type="submit">Create</button>
+        </div>
+      </form>
+      <div id="back-button" onclick="location.href = '/signup'">←</div>
+    </div>
+    <div id="heading">myVok</div>
+    <script>
+      document
+        .getElementById("nameInput")
+        .addEventListener("keyup", async () => {
+          let username = document
+            .getElementById("nameInput")
+            .value.trim()
+            .toLowerCase()
+            .replaceAll(" ", ".")
+            .replace(/[^a-zA-Z0-9.]/g, "");
+
+          if (username !== "") {
+            try {
+              // Anfrage an den Server, um den Benutzernamen zu überprüfen
+              let response = await fetch("/username-count/" + username);
+              let data = await response.json();
+
+              // Username-Ausgabe basierend auf der Antwort
+              if (data.count === 0) {
+                document.getElementById("usernameOutput").innerHTML =
+                  "Username: " + username;
+              } else {
+                document.getElementById("usernameOutput").innerHTML =
+                  "Username: " + username + "#" + data.count;
+              }
+            } catch (error) {
+              console.error("Error fetching username count:", error);
+              document.getElementById("usernameOutput").innerHTML =
+                "Error checking username. Please try again.";
+            }
+          } else {
+            document.getElementById("usernameOutput").innerHTML =
+              "Please enter your name";
+          }
+        });
+    </script>
+  </body>
+</html>
+
+################################################################################
+
+
+# File: C:\dev\myVok\public\success_signup.html
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="assets/styles/index.css" />
+    <title>myVok</title>
+  </head>
+  <body>
+    <div id="licenseBox">
+      <form id="licenseform" method="get" action="/login">
+        Success!<br />
+        <span style="font-size: 0.7em"
+          >Account created!<br /><span style="font-size: 0.5em">Username: </span
+          >USERNAME_REPLACE</span
+        >
+        <button
+          type="submit"
+          style="
+            margin: 0;
+            margin-top: 15px;
+            margin-left: 50%;
+            transform: translateX(-50%);
+            width: 400px;
+          "
+        >
+          Log-In
+        </button>
+      </form>
+      <div id="back-button" onclick="location.href = '/signup'">←</div>
+    </div>
+    <div id="heading">myVok</div>
+  </body>
+</html>
+
+################################################################################
+
+
+# File: C:\dev\myVok\public\assets\scripts\dashboard.js
+const ctx = document.querySelector(".activity-chart");
+const ctx2 = document.querySelector(".prog-chart");
+
+new Chart(ctx, {
+  type: "bar",
+  data: {
+    labels: ["M", "T", "W", "T", "F", "S", "S"],
+    datasets: [
+      {
+        label: "Time",
+        data: [8, 6, 7, 6, 10, 8, 4],
+        backgroundColor: "#1e293b",
+        borderWidth: 3,
+        borderRadius: 6,
+        hoverBackgroundColor: "#60a5fa",
+      },
+    ],
+  },
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    scales: {
+      x: {
+        border: {
+          display: true,
+        },
+        grid: {
+          display: true,
+          color: "#1e293b",
+        },
+      },
+      y: {
+        ticks: {
+          display: false,
+        },
+      },
+    },
+    plugins: {
+      legend: {
+        display: false,
+      },
+    },
+    animation: {
+      duration: 1000,
+      easing: "easeInOutQuad",
+    },
+  },
+});
+
+new Chart(ctx2, {
+  type: "line",
+  data: {
+    labels: ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul"],
+    datasets: [
+      {
+        label: "Class GPA",
+        data: [6, 10, 8, 14, 6, 7, 4],
+        borderColor: "#0891b2",
+        tension: 0.4,
+      },
+      {
+        label: "Aver GPA",
+        data: [8, 6, 7, 6, 11, 8, 10],
+        borderColor: "#ca8a04",
+        tension: 0.4,
+      },
+    ],
+  },
+  options: {
+    responsive: true,
+    maintainAspectRatio: true,
+    scales: {
+      x: {
+        grid: {
+          display: false,
+        },
+      },
+      y: {
+        ticks: {
+          display: false,
+        },
+        border: {
+          display: false,
+          dash: [5, 5],
+        },
+      },
+    },
+    plugins: {
+      legend: {
+        display: false,
+      },
+    },
+    animation: {
+      duration: 1000,
+      easing: "easeInOutQuad",
+    },
+  },
+});
+
+################################################################################
+
+
+# File: C:\dev\myVok\public\assets\styles\dashboard.css
+@import url("https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&display=swap");
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  font-family: "Poppins", sans-serif;
+}
+
+a {
+  text-decoration: none;
+  color: #f1f3f2;
+  font-size: 14px;
+}
+
+canvas {
+  width: 100% !important;
+}
+
+img {
+  object-fit: cover;
+}
+
+body {
+  background: #f1f3f2;
+}
+
+.top-container {
+  background: #031224;
+  border-radius: 0 0 30px 30px;
+  padding-bottom: 10px;
+}
+
+.top-container .nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 20px 14px;
+  border-bottom: 2px solid #1e293b;
+}
+
+.top-container .nav .logo {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.top-container .nav .logo i {
+  color: #f1f3f2;
+  font-size: 24px;
+}
+
+.top-container .nav .logo a {
+  font-size: 16px;
+}
+
+.top-container .nav .nav-links {
+  display: flex;
+  gap: 20px;
+}
+
+.top-container .nav .nav-links a {
+  color: #ccc;
+  transition: all 0.3s ease;
+}
+
+.top-container .nav .nav-links a:hover {
+  color: #fff;
+}
+
+.top-container .nav .right-section {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.top-container .nav .right-section > i {
+  color: #f1f3f2;
+  background: #1e293b;
+  padding: 12px;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.top-container .nav .right-section .profile {
+  display: flex;
+  align-items: center;
+  background: #1e293b;
+  padding: 0 10px;
+  border-radius: 50px;
+  gap: 10px;
+}
+
+.top-container .nav .right-section .profile .info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.top-container .nav .right-section .profile .info img {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 1px solid #f1f3f2;
+}
+
+.top-container .nav .right-section .profile .info a {
+  font-size: 13px;
+}
+
+.top-container .nav .right-section .profile .info p {
+  font-size: 13px;
+  color: #ccc;
+}
+
+.top-container .nav .right-section .profile > i {
+  color: #f1f3f2;
+  font-size: 22px;
+  cursor: pointer;
+}
+
+.top-container .status {
+  padding: 20px 20px 10px;
+}
+
+.top-container .status .header {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  margin-bottom: 20px;
+}
+
+.top-container .status .header h4 {
+  color: #f1f3f2;
+  font-weight: 500;
+}
+
+.top-container .status .header h4#big {
+  flex: 3;
+}
+
+.top-container .status .header h4#small {
+  flex: 1;
+  padding-left: 90px;
+}
+
+.top-container .status .items-list {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.top-container .status .items-list .item {
+  background: #e0f2fe;
+  width: 25%;
+  padding: 20px;
+  border-radius: 18px;
+}
+
+.top-container .status .items-list .item:nth-child(2) {
+  background: #fffbeb;
+}
+
+.top-container .status .items-list .item:nth-child(3) {
+  background: #bfdbfe;
+}
+
+.top-container .status .items-list .item:nth-child(4) {
+  background: #031224;
+  padding: 10px;
+}
+
+.top-container .status .items-list .item .info {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 40px;
+}
+
+.top-container .status .items-list .item .info h5 {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+
+.top-container .status .items-list .item .info p {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.top-container .status .items-list .item .info > i {
+  font-size: 20px;
+  padding: 10px;
+  background: #031224;
+  color: #f1f3f2;
+  border-radius: 50%;
+}
+
+.top-container .status .items-list .item .progress {
+  position: relative;
+  height: 10px;
+  background: #b7c0cd;
+  border-radius: 10px;
+}
+
+.top-container .status .items-list .item .progress .bar {
+  width: 92%;
+  height: 10px;
+  background: #031224;
+  border-radius: 10px;
+}
+
+.top-container .status .items-list .item .progress::before {
+  content: "92%";
+  position: absolute;
+  top: -40px;
+  right: 0;
+  font-size: 22px;
+  font-weight: 600;
+}
+
+.top-container .status .items-list .item:nth-child(2) .progress {
+  background: #d6d3d1;
+}
+
+.top-container .status .items-list .item:nth-child(2) .progress .bar {
+  width: 65%;
+}
+
+.top-container .status .items-list .item:nth-child(2) .progress::before {
+  content: "65%";
+}
+
+.top-container .status .items-list .item:nth-child(3) .progress {
+  background: #94a3b8;
+}
+
+.top-container .status .items-list .item:nth-child(3) .progress .bar {
+  width: 80%;
+}
+
+.top-container .status .items-list .item:nth-child(3) .progress::before {
+  content: "80%";
+}
+
+.bottom-container {
+  display: flex;
+  gap: 20px;
+  padding: 30px;
+}
+
+.bottom-container .prog-status,
+.bottom-container .popular,
+.bottom-container .upcoming {
+  background: #fefefe;
+  padding: 20px;
+  border-radius: 24px;
+}
+
+.bottom-container .prog-status {
+  width: 50%;
+}
+
+.bottom-container .prog-status .header,
+.bottom-container .popular .header,
+.bottom-container .upcoming .header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.bottom-container .prog-status .header h4,
+.bottom-container .popular .header h4,
+.bottom-container .upcoming .header h4 {
+  font-weight: 600;
+}
+
+.bottom-container .prog-status .header .tabs {
+  background: #f3f3f3;
+  padding: 4px;
+  border-radius: 20px;
+  display: flex;
+  gap: 5px;
+}
+
+.bottom-container .prog-status .header .tabs a {
+  padding: 4px 20px;
+  font-size: 12px;
+  color: #000;
+  border-radius: 20px;
+  font-weight: 600;
+}
+
+.bottom-container .prog-status .header .tabs a.active {
+  background: #fff;
+}
+
+.bottom-container .prog-status .details {
+  display: flex;
+  margin-bottom: 30px;
+  gap: 20px;
+}
+
+.bottom-container .prog-status .details .item h2 {
+  font-size: 30px;
+  font-weight: 400;
+}
+
+.bottom-container .prog-status .details .item p {
+  font-size: 13px;
+  color: #9b9b9b;
+}
+
+.bottom-container .prog-status .details .separator {
+  width: 2px;
+  height: 70px;
+  background: #f3f3f3;
+}
+
+.bottom-container .popular {
+  width: 25%;
+}
+
+.bottom-container .popular .header,
+.bottom-container .upcoming .header {
+  margin-bottom: 40px;
+}
+
+.bottom-container .popular .header a,
+.bottom-container .upcoming .header a {
+  font-size: 12px;
+  color: #000;
+  font-weight: 600;
+  padding: 4px 8px;
+  background: #f3f3f3;
+  border-radius: 20px;
+}
+
+.bottom-container .popular > img {
+  width: 100%;
+  aspect-ratio: 16/9;
+  border-radius: 20px;
+  margin-bottom: 20px;
+}
+
+.bottom-container .popular .audio {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 20px;
+}
+
+.bottom-container .popular .audio i {
+  font-size: 26px;
+  background: #eff6ff;
+  padding: 6px;
+  border-radius: 50%;
+}
+
+.bottom-container .popular .audio a {
+  font-size: 15px;
+  font-weight: 600;
+  color: #000;
+  line-height: 18px;
+}
+
+.bottom-container .popular > p {
+  font-size: 14px;
+  font-weight: 500;
+  margin-bottom: 50px;
+}
+
+.bottom-container .popular .listen {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.bottom-container .popular .listen .author {
+  padding: 6px 10px;
+  background: #f3f3f3;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-radius: 10px;
+}
+
+.bottom-container .popular .listen .author img {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+}
+
+.bottom-container .popular .listen .author a {
+  font-size: 14px;
+  color: #000;
+}
+
+.bottom-container .popular .listen .author p {
+  font-size: 12px;
+  color: #9b9b9b;
+}
+
+.bottom-container .popular .listen button {
+  border: none;
+  color: #fff;
+  background: #031224;
+  padding: 6px 14px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.bottom-container .popular .listen button i {
+  font-size: 16px;
+}
+
+.bottom-container .upcoming {
+  width: 25%;
+}
+
+.bottom-container .upcoming .dates {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 40px;
+}
+
+.bottom-container .upcoming .dates .item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.bottom-container .upcoming .dates .item h5 {
+  font-weight: 600;
+}
+
+.bottom-container .upcoming .dates .item a {
+  color: #000;
+  font-size: 13px;
+  padding: 5px 9px;
+  border-radius: 50%;
+  font-weight: 600;
+  transition: all 0.3s ease;
+}
+
+.bottom-container .upcoming .dates .item.active a,
+.bottom-container .upcoming .dates .item a:hover {
+  color: #fff;
+  background: #031224;
+}
+
+.bottom-container .upcoming .events {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.bottom-container .upcoming .events .item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #eff6ff;
+  padding: 10px;
+  border-radius: 10px;
+}
+
+.bottom-container .upcoming .events .item > i {
+  cursor: pointer;
+}
+
+.bottom-container .upcoming .events .item > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.bottom-container .upcoming .events .item > div i {
+  font-size: 30px;
+}
+
+.bottom-container .upcoming .events .item .event-info a {
+  font-size: 14px;
+  color: #000;
+  font-weight: 500;
+}
+
+.bottom-container .upcoming .events .item .event-info p {
+  font-size: 13px;
+  color: #9b9b9b;
+}
+
+@media screen and (max-width: 1300px) {
+  .bottom-container .popular .audio a {
+    margin-bottom: 20px;
+    font-size: 12px;
+  }
+
+  .bottom-container .popular > p {
+    margin-bottom: 20px;
+    font-size: 12px;
+  }
+
+  .bottom-container .popular .listen {
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .bottom-container .popular .listen .author {
+    width: 100%;
+  }
+
+  .bottom-container .popular .listen button {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .bottom-container .upcoming .events .item {
+    padding: 6px 10px;
+  }
+
+  .bottom-container .upcoming .events .item > div i {
+    font-size: 20px;
+  }
+
+  .bottom-container .upcoming .events .item .event-info a {
+    font-size: 13px;
+  }
+
+  .bottom-container .upcoming .events .item .event-info p {
+    font-size: 12px;
+  }
+}
+
+@media screen and (max-width: 1080px) {
+  .top-container .nav .right-section .profile {
+    padding: 5px;
+  }
+
+  .top-container .nav .right-section .profile .info p,
+  .top-container .status .header h4#small {
+    display: none;
+  }
+
+  .top-container .status .items-list {
+    flex-wrap: wrap;
+  }
+
+  .top-container .status .items-list .item {
+    width: 48%;
+  }
+
+  .bottom-container {
+    flex-wrap: wrap;
+  }
+
+  .bottom-container .prog-status {
+    width: 100%;
+  }
+
+  .bottom-container .popular,
+  .bottom-container .upcoming {
+    width: 48%;
+  }
+
+  .bottom-container .popular .audio a {
+    font-size: 15px;
+  }
+
+  .bottom-container .popular > p {
+    font-size: 14px;
+    margin-bottom: 40px;
+  }
+
+  .bottom-container .popular .listen {
+    flex-direction: row;
+  }
+
+  .bottom-container .popular .listen button {
+    width: 50%;
+  }
+
+  .bottom-container .upcoming .events .item {
+    padding: 10px;
+  }
+
+  .bottom-container .upcoming .events .item > div i {
+    font-size: 30px;
+  }
+
+  .bottom-container .upcoming .events .item .event-info a {
+    font-size: 14px;
+  }
+}
+
+@media screen and (max-width: 768px) {
+  .top-container .nav {
+    flex-direction: column;
+    gap: 15px;
+  }
+
+  .top-container .status .items-list .item .info h5 {
+    font-size: 15px;
+  }
+
+  .bottom-container .popular,
+  .bottom-container .upcoming {
+    width: 100%;
+  }
+}
+
+################################################################################
+
+
+# File: C:\dev\myVok\public\assets\styles\index.css
+@import url("https://fonts.googleapis.com/css2?family=Fira+Sans:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&family=Lilita+One&family=Roboto:ital,wght@0,100;0,300;0,400;0,500;0,700;0,900;1,100;1,300;1,400;1,500;1,700;1,900&display=swap");
+
+body {
+  height: 100vh;
+  margin: 0;
+  background: conic-gradient(
+    from 0deg,
+    #dce0d7 0%,
+    #c5dcbf 12%,
+    #d9e2c8 25%,
+    #efe5bc 37%,
+    #dce2db 50%,
+    #c5d7e7 62%,
+    #d7d3d7 75%,
+    #ebc8bc 87%,
+    #dce0d7 100%
+  );
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+#licenseBox {
+  width: 600px;
+  height: 450px;
+  max-width: 95vw;
+  max-height: 95vh;
+  background-color: rgb(240, 240, 240);
+  transform: perspective(800px) rotateY(-3deg);
+  transition: transform 0.5s ease 0s;
+  border-radius: 8px;
+  box-shadow: rgba(0, 0, 0, 0.024) 0px 0px 0px 1px,
+    rgba(0, 0, 0, 0.05) 0px 1px 0px 0px, rgba(0, 0, 0, 0.03) 0px 0px 8px 0px,
+    rgba(0, 0, 0, 0.1) 0px 20px 30px 0px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  &:hover {
+    transform: perspective(800px) rotateY(0deg);
+  }
+}
+
+#heading {
+  font-family: "Lilita One", sans-serif;
+  font-weight: 400;
+  font-style: normal;
+  color: black;
+  margin: 20px;
+  position: absolute;
+  font-size: 50px;
+  top: 0;
+  left: 0;
+}
+
+#licenseform {
+  font-family: "Fira Sans", sans-serif;
+  font-weight: 200;
+  font-style: normal;
+  font-size: 45px;
+  color: black;
+  text-align: center;
+  letter-spacing: 2px;
+
+  input {
+    font-family: "Fira Sans", sans-serif;
+    width: 400px;
+    height: 50px;
+    margin-top: 20px;
+    text-align: center;
+    font-size: 25px;
+    border: none;
+    border-bottom: 2px solid rgb(36, 91, 143);
+    outline: none;
+    background-color: #ffffff00;
+    padding: 0;
+    max-width: 85vw;
+  }
+
+  button,
+  div.button {
+    border: none;
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    margin-left: 30px;
+    width: 120px;
+    height: 35px;
+    border-radius: 5px;
+    background-color: rgb(63, 104, 143);
+    transition: all 0.2s;
+
+    &:hover {
+      background-color: rgb(36, 91, 143);
+      transform: scale(1.1);
+    }
+  }
+
+  span {
+    font-weight: 300;
+    font-family: "Roboto", sans-serif;
+    font-size: 20px;
+  }
+
+  #submit-section {
+    display: flex;
+    flex-direction: row;
+    justify-content: center;
+    align-items: center;
+    margin: 30px;
+  }
+}
+
+#back-button {
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  position: absolute;
+  top: 0;
+  left: 0;
+  margin: 10px;
+  width: 40px;
+  height: 40px;
+  border-radius: 5px;
+  background-color: rgb(63, 104, 143);
+  transition: all 0.2s;
+
+  &:hover {
+    background-color: rgb(36, 91, 143);
+    transform: scale(1.1);
+  }
+}
+
+################################################################################
